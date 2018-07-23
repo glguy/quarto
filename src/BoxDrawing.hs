@@ -199,31 +199,23 @@ renderGrid ::
   (Coord -> Orient -> Maybe Weight) {- ^ edge logic -} ->
   (Coord -> Image)                  {- ^ cell logic -} ->
   Image                             {- ^ grid lines -}
-renderGrid w h edge cell = rearrange (map (map render1) grid)
+renderGrid w h edge cell =
+  vertCat [ horizCat [render1 x y | x <- [0..w] ] | y <- [0..h] ]
   where
-    grid :: [[(Coord, Image)]]
-    grid = [[(c, if x == w || y == h then emptyImage else cell c)
-           | x <- [0..w], let c = C x y] | y <- [0..h]]
+    box u d l r = fromMaybe ' ' (boxChar u d l r)
 
-    box' u d l r = fromMaybe ' ' (boxChar u d l r)
+    check p x = if p then x else emptyImage
 
-    -- rows of cells of (lines in cell) to single string
-    rearrange :: [[Image]] -> Image
-    rearrange = vertCat . map horizCat
-
-    render1 :: (Coord, Image) -> Image
-    render1 (c@(C x y), cell) = line1 <-> if y<h then line2 else emptyImage
+    render1 :: Int -> Int -> Image
+    render1 x y = corner <|> check (x<w) edgeR
+              <-> check (y<h) (edgeD <|> check (x<w) (cell c))
       where
+        c  = C x y
         eR = guard (x<w) >> edge c        Horiz
         eD = guard (y<h) >> edge c        Vert
         eL = guard (0<x) >> edge (left c) Horiz
         eU = guard (0<y) >> edge (up   c) Vert
 
-        line1 = char defAttr (box' eU eD eL eR) <|>
-                if x<w then string defAttr (replicate 2 (box' Nothing Nothing eR eR))
-                       else emptyImage
-        line2 = char defAttr (box' eD eD Nothing Nothing) <|>
-                if x<w then cell else emptyImage
-
-leftPad :: Int -> String -> String
-leftPad i str = replicate (i - length str) ' ' ++ str
+        corner = char defAttr (box eU eD eL eR)
+        edgeD  = char defAttr (box eD eD Nothing Nothing)
+        edgeR  = charFill defAttr (box Nothing Nothing eR eR) 2 1

@@ -225,13 +225,16 @@ drawQuarto inp q = renderGrid 4 4 edge cell
 -- | Draw the available pieces and corresponding piece IDs
 pieceKey :: Modality -> Quarto -> Image
 pieceKey inp q
-  = horizCat
-  $ [ string defAttr (intToDigit i : "  ") <->
-      pieceGlyph piece
-    | i <- [0..0xf]
-    , let piece = Piece i
-    , not (pieceUsed q piece), Just piece /= picked ]
+  | null images = charFill defAttr ' ' 1 2
+  | otherwise   = horizCat images
   where
+    images =
+      [ string defAttr (intToDigit i : "  ") <->
+        pieceGlyph piece
+      | i <- [0..0xf]
+      , let piece = Piece i
+      , not (pieceUsed q piece), Just piece /= picked ]
+
     picked = case inp of
                 PosnPieceInput _ p -> Just p
                 _                  -> Nothing
