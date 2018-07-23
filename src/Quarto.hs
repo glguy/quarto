@@ -5,7 +5,7 @@ import Control.Concurrent.Async (Async, async, cancel, waitCatchSTM)
 import Control.Exception        (bracket, evaluate)
 import Data.Char                (digitToInt, intToDigit, isHexDigit)
 import Data.Foldable            (asum, traverse_)
-import Data.Maybe               (isJust)
+import Data.Maybe               (fromMaybe, isJust)
 
 -- random
 import System.Random (randomRIO)
@@ -40,12 +40,12 @@ data Modality
   = NoInput
   | PosnInput Posn
   | PosnPieceInput Posn Piece
-  | GameOver
+  | GameOver [Posn] -- list of positions to highlight
   deriving Show
 
 isGameOver :: Modality -> Bool
-isGameOver GameOver = True
-isGameOver _        = False
+isGameOver GameOver{} = True
+isGameOver _          = False
 
 main :: IO ()
 main =
@@ -82,23 +82,30 @@ main' app =
      case ev of
        AsyncFinished -> main' app { appAsync = Nothing }
        VtyEvent vtyEvent -> doVtyEvent app vtyEvent
+
        HintEvent hint ->
          case hint of
+
            (depth, Draw []) ->
              main' app { appHint = Nothing
                        , appSearch = Just (depth, D) }
+
            (depth, Draw xs) ->
              do i <- randomRIO (0, length xs - 1)
                 let (piece,posn) = xs !! i
                 main' app { appHint = Just (posn, piece)
                           , appSearch = Just (depth, D) }
+
            (depth, Win piece posn) ->
              main' app { appHint = Just (posn, piece)
                        , appSearch = Just (depth, W) }
+
            (depth, Lose) ->
                main' app { appSearch = Just (depth, L) }
 
 
+-- | Cancel any previous search thread and create a new one for the current
+-- game state.
 doAI :: App -> IO App
 doAI app =
   do traverse_ cancel (appAsync app)
@@ -158,8 +165,12 @@ doVtyEvent app ev =
        -- 3. Confirm placement
        (EvKey KEnter [], PosnPieceInput posn piece) ->
          do let quarto   = setPieceAt piece posn (appQuarto app)
-                finished = checkWinAt posn quarto
-            main' =<< doAI app { appMode     = if finished then GameOver else NoInput
+                newMode
+                  | checkWinAt posn quarto =
+                      GameOver (fromMaybe [] (winningPositions posn quarto))
+                  | isBoardFull quarto = GameOver []
+                  | otherwise = NoInput
+            main' =<< doAI app { appMode     = newMode
                                , appQuarto   = quarto
                                , appHint     = Nothing }
 
@@ -173,32 +184,31 @@ drawApp app =
   drawMode   (appMode app)                 <->
   if isGameOver (appMode app)
     then emptyImage
-    else renderHint (isJust (appAsync app)) (appSearch app) (appHint app)
+    else drawHint (isJust (appAsync app)) (appSearch app) (appHint app)
 
 drawMode :: Modality -> Image
 drawMode NoInput          = string defAttr "<Select position>"
 drawMode PosnInput     {} = string defAttr "<Select piece>"
 drawMode PosnPieceInput{} = string defAttr "<Press ENTER>"
-drawMode GameOver         = string defAttr "Game Over (new game: n)"
+drawMode GameOver      {} = string defAttr "Game Over (new game: n)"
 
 drawQuarto :: Modality -> Quarto -> Image
 drawQuarto inp q = renderGrid 4 4 edge cell
   where
-    selPosn
-      = fmap (\x -> posnId x `divMod` 4)
+    selected
+      = map (\x -> C (x`mod`4) (x`div`4))
+      $ map posnId
       $ case inp of
-          PosnInput      p   -> Just p
-          PosnPieceInput p _ -> Just p
-          _                  -> Nothing
-
-    selRow = fst <$> selPosn
-    selCol = snd <$> selPosn
+          PosnInput      p   -> [p]
+          PosnPieceInput p _ -> [p]
+          GameOver ps        -> ps
+          NoInput            -> []
 
     -- boundary of selection
-    edge (C col row) o
-      | selRow == Just row || o == Horiz && selRow == Just (row-1)
-      , selCol == Just col || o == Vert  && selCol == Just (col-1) = Just Heavy
-      | otherwise = Just Thin
+    edge c _     |      c `elem` selected = Just Heavy
+    edge c Horiz | up   c `elem` selected = Just Heavy
+    edge c Vert  | left c `elem` selected = Just Heavy
+    edge _ _                              = Just Thin
 
     cell (C col row) =
       let posn = Posn (row * 4 + col) in
@@ -226,8 +236,8 @@ pieceKey inp q
                 PosnPieceInput _ p -> Just p
                 _                  -> Nothing
 
-renderHint :: Bool -> Maybe (Int, Result) -> Maybe (Posn, Piece) -> Image
-renderHint running search hint =
+drawHint :: Bool -> Maybe (Int, Result) -> Maybe (Posn, Piece) -> Image
+drawHint running search hint =
   horizCat [searchPart, movePart, runningPart]
 
   where
@@ -275,7 +285,7 @@ pieceGlyph (Piece p) = string (defAttr `withForeColor` color `withStyle` bold) s
         5 -> "○○"
         6 -> "■■"
         7 -> "□□"
-        _ -> error "renderPiece: impossible"
+        _ -> error "pieceGlyph: impossible"
 
 -- | Iterative-deepening depth-first search of the game tree.
 -- This action will run up to the given amount of time printing

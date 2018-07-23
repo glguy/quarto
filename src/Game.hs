@@ -1,6 +1,7 @@
 module Game where
 
 import Data.Bits
+import Data.List (find)
 import Data.Word
 
 -- | Pieces are represented as a number in the range @0@ to @15@.
@@ -82,6 +83,9 @@ setPieceAt (Piece piece) (Posn posn) (Quarto x y) = Quarto x' y'
            `setBit` (piece*4+1)
     y' = y .|. fromIntegral piece`shiftL`(posn*4)
 
+isBoardFull :: Quarto -> Bool
+isBoardFull (Quarto x _) = testAllSet x 0x1111111111111111
+
 -- END OF BIT FIDDLING -------------------------------------------------
 
 possibleMoves :: Quarto -> [(Piece, Posn, Quarto)]
@@ -122,6 +126,13 @@ matchFour (Quarto x y) (Four z) = allPlaced && attrMatch
 -- position resulted in a win.
 checkWinAt :: Posn -> Quarto -> Bool
 checkWinAt i q = any (matchFour q) (candidateFours i)
+
+
+winningPositions :: Posn -> Quarto -> Maybe [Posn]
+winningPositions p q = fourToPosns <$> find (matchFour q) (candidateFours p)
+
+fourToPosns :: Four -> [Posn]
+fourToPosns (Four x) = [ Posn i | i <- [0 .. 0xf], testBit x (4*i) ]
 
 -- | 'Four' values correspond to bit masks of 4 bits corresponding
 -- to rows, columns, and diagonals on the game board. These values
