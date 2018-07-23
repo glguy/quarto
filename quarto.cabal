@@ -1,0 +1,37 @@
+name:                quarto
+version:             0.1.0.0
+synopsis:            Console-based implementation of Quarto board game
+description:         Quarto is a board game in which two players alternate
+                     placing game pieces on the board until one player
+                     successfully creates a matching row, column, or
+                     diagonal of 4 pieces where at least one attribute
+                     of the 4 pieces all matches.
+                     .
+                     Each piece has 4 attributes: shape, fill, count, color.
+                     .
+                     In addition to playing the game the console application
+                     will also perform a search looking for a winning move.
+
+license:             ISC
+license-file:        LICENSE
+author:              Eric Mertens
+maintainer:          emertens@galois.com
+copyright:           Eric Mertens 2018
+category:            Game
+build-type:          Simple
+extra-source-files:  ChangeLog.md
+cabal-version:       >=1.10
+
+executable quarto
+  main-is:             Quarto.hs
+  other-modules:       BoxDrawing, Coord, Game
+  ghc-options:         -O2 -threaded
+  hs-source-dirs:      src
+
+  build-depends:       base == 4.11.*,
+                       random == 1.1.*,
+                       async == 2.2.*,
+                       stm == 2.4.*,
+                       vty == 5.22.*
+
+  default-language:    Haskell2010
