@@ -12,7 +12,7 @@ import System.Random (randomRIO)
 
 -- stm
 import Control.Concurrent.STM
-         (TChan, newTChanIO, readTChan, atomically, retry, writeTChan)
+         (TQueue, newTQueueIO, readTChan, readTQueue, atomically, retry, writeTQueue)
 
 -- vty
 import Graphics.Vty
@@ -24,13 +24,13 @@ import Game
 
 -- | State of application
 data App = App
-  { appVty    :: Vty                   -- ^ terminal handle
-  , appQuarto :: Quarto                -- ^ game board
-  , appMode   :: Modality              -- ^ application input mode
-  , appSearch :: Maybe (Int, Result)   -- ^ most recent search result
-  , appHint   :: Maybe (Posn, Piece)   -- ^ most recent move hint
-  , appAsync  :: Maybe (Async ())      -- ^ handle to search thread
-  , appChannel :: TChan (Int, Outcome) -- ^ results from search thread
+  { appVty    :: Vty                    -- ^ terminal handle
+  , appQuarto :: Quarto                 -- ^ game board
+  , appMode   :: Modality               -- ^ application input mode
+  , appSearch :: Maybe (Int, Result)    -- ^ most recent search result
+  , appHint   :: Maybe (Posn, Piece)    -- ^ most recent move hint
+  , appAsync  :: Maybe (Async ())       -- ^ handle to search thread
+  , appChannel :: TQueue (Int, Outcome) -- ^ results from search thread
   }
 
 -- | The result of a search can indicate: Win, Lose, and Draw
@@ -49,7 +49,7 @@ isGameOver _          = False
 
 main :: IO ()
 main =
-  newTChanIO >>= \tchan ->
+  newTQueueIO >>= \tchan ->
   bracket (mkVty mempty) shutdown $ \vty ->
   main' App
     { appVty    = vty
@@ -72,7 +72,7 @@ getEvent :: App -> IO AppEvent
 getEvent app =
   atomically $ asum
     [ VtyEvent      <$> readTChan (_eventChannel (inputIface (appVty app)))
-    , HintEvent     <$> readTChan (appChannel app)
+    , HintEvent     <$> readTQueue (appChannel app)
     , AsyncFinished <$  maybe retry waitCatchSTM (appAsync app) ]
 
 main' :: App -> IO ()
@@ -83,7 +83,8 @@ main' app =
 
        AsyncFinished -> main' app { appAsync = Nothing }
 
-       VtyEvent vtyEvent -> doVtyEvent app vtyEvent
+       VtyEvent (EvKey key []) -> doKeyEvent app key
+       VtyEvent _              -> main' app
 
        HintEvent hint ->
          case hint of
@@ -117,40 +118,40 @@ doAI app =
      if isGameOver (appMode app)
        then return app
        else do thread <- ai (appChannel app) (appQuarto app)
-               return $! app { appAsync = Just thread }
+               return app { appAsync = Just thread }
 
-doVtyEvent :: App -> Event -> IO ()
-doVtyEvent app ev =
-     case (ev, appMode app) of
+doKeyEvent :: App -> Key -> IO ()
+doKeyEvent app key =
+     case (key, appMode app) of
 
        -- Quit
-       (EvKey KEsc [], _) -> return () -- exit event loop
+       (KEsc, _) -> return () -- exit event loop
 
        -- Cancel position choice
-       (EvKey KBS [], PosnInput _) ->
+       (KBS, PosnInput _) ->
          main' app { appMode = NoInput }
 
        -- Cancel piece choice
-       (EvKey KBS [], PosnPieceInput posn _) ->
+       (KBS, PosnPieceInput posn _) ->
          main' app { appMode = PosnInput posn }
 
        -- Start AI
-       (EvKey (KChar '?') [], _) ->
+       (KChar '?', _) ->
          main' =<< doAI app
 
        -- Stop AI
-       (EvKey (KChar 'x') [], _) ->
+       (KChar 'x', _) ->
          do traverse_ cancel (appAsync app)
             main' app { appAsync = Nothing }
 
        -- Use hint as input
-       (EvKey (KChar 'h') [], mode)
+       (KChar 'h', mode)
          | not (isGameOver mode)
          , Just (posn, piece) <- appHint app ->
            main' app { appMode = PosnPieceInput posn piece }
 
        -- Restart
-       (EvKey (KChar 'n') [], _) ->
+       (KChar 'n', _) ->
          do traverse_ cancel (appAsync app)
             main' app
               { appAsync  = Nothing
@@ -160,21 +161,21 @@ doVtyEvent app ev =
               , appMode   = NoInput }
 
        -- 1. Choose a position
-       (EvKey (KChar c) [], NoInput)
+       (KChar c, NoInput)
          | isHexDigit c
          , let posn = Posn (digitToInt c)
          , not (positionCovered (appQuarto app) posn) ->
          main' app { appMode = PosnInput posn }
 
        -- 2. Choose a piece
-       (EvKey (KChar c) [], PosnInput posn)
+       (KChar c, PosnInput posn)
          | isHexDigit c
          , let piece = Piece (digitToInt c)
          , not (pieceUsed (appQuarto app) piece) ->
          main' app { appMode = PosnPieceInput posn piece }
 
        -- 3. Confirm placement
-       (EvKey KEnter [], PosnPieceInput posn piece) ->
+       (KEnter, PosnPieceInput posn piece) ->
          do let quarto   = setPieceAt piece posn (appQuarto app)
                 newMode
                   | checkWinAt posn quarto =
@@ -194,18 +195,34 @@ doVtyEvent app ev =
 
 drawApp :: App -> Image
 drawApp app =
+  string defAttr " Game Board  -  Available Pieces" <->
+
+  drawQuarto (appMode app) (appQuarto app) <|>
+  char defAttr ' ' <|>
   pieceKey   (appMode app) (appQuarto app) <->
-  drawQuarto (appMode app) (appQuarto app) <->
-  drawMode   (appMode app)                 <->
+
+  drawMode   (appMode app) <|> drawActivity (appAsync app) <->
+
   if isGameOver (appMode app)
     then emptyImage
-    else drawHint (isJust (appAsync app)) (appSearch app) (appHint app)
+    else drawHint (appSearch app) (appHint app)
 
 drawMode :: Modality -> Image
 drawMode NoInput          = string defAttr "<Select position>"
 drawMode PosnInput     {} = string defAttr "<Select piece>"
 drawMode PosnPieceInput{} = string defAttr "<Press ENTER>"
 drawMode GameOver      {} = string defAttr "Game Over (new game: n)"
+
+-- | Indicate if search thread is running and now affect that.
+drawActivity :: Maybe (Async ()) -> Image
+drawActivity Just{} =
+  string defAttr " ["                 <|>
+  char (defAttr `withStyle` bold) 'x' <|>
+  string defAttr " stop search]"
+drawActivity Nothing =
+  string defAttr " ["                 <|>
+  char (defAttr `withStyle` bold) '?' <|>
+  string defAttr " for hint]"
 
 drawQuarto :: Modality -> Quarto -> Image
 drawQuarto inp q = renderGrid 4 4 edge cell
@@ -239,30 +256,27 @@ drawQuarto inp q = renderGrid 4 4 edge cell
 
 -- | Draw the available pieces and corresponding piece IDs
 pieceKey :: Modality -> Quarto -> Image
-pieceKey inp q
-  | null images = charFill defAttr ' ' 1 2
-  | otherwise   = horizCat images
+pieceKey inp q =
+  vertCat
+    [ horizCat
+        [ if pieceUsed q piece || Just piece == picked
+          then charFill defAttr ' ' 5 1 <->
+               char defAttr '·'
+          else charFill defAttr ' ' 5 1 <->
+               string defAttr (intToDigit (pieceId piece) : " ") <|>
+               pieceGlyph piece
+      | piece <- Piece <$> [row .. row+3] ]
+    | row <- [0, 4 .. 12] ]
   where
-    images =
-      [ string defAttr (intToDigit i : "  ") <->
-        pieceGlyph piece
-      | i <- [0..0xf]
-      , let piece = Piece i
-      , not (pieceUsed q piece), Just piece /= picked ]
-
     picked = case inp of
                 PosnPieceInput _ p -> Just p
                 _                  -> Nothing
 
-drawHint :: Bool -> Maybe (Int, Result) -> Maybe (Posn, Piece) -> Image
-drawHint running search hint =
-  horizCat [searchPart, movePart, runningPart]
+drawHint :: Maybe (Int, Result) -> Maybe (Posn, Piece) -> Image
+drawHint search hint =
+  horizCat [searchPart, movePart]
 
   where
-    runningPart = string defAttr
-                $ if running then " [thinking: press x to stop]"
-                             else " [press ? to search]"
-
     searchPart =
       case search of
         Nothing         -> string defAttr "No search result"
@@ -312,7 +326,7 @@ pieceGlyph (Piece p) = string (defAttr `withForeColor` color `withStyle` bold) s
 -- outcomes of searches at increasing depths until time expires
 -- or a conclusive outcome is determined.
 ai ::
-  TChan (Int,Outcome) {- ^ output channel -} ->
+  TQueue (Int,Outcome) {- ^ output channel -} ->
   Quarto {- ^ game configuration -} ->
   IO (Async ())
 ai tchan q = async (loop 1)
@@ -322,7 +336,7 @@ ai tchan q = async (loop 1)
     loop depth =
       do let outcome = bestOutcome depth q
          evaluate outcome
-         atomically (writeTChan tchan (depth, outcome))
+         atomically (writeTQueue tchan (depth, outcome))
          case outcome of
            Draw (_:_) | depth < maxDepth -> loop (depth+1)
            _                             -> return ()
