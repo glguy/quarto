@@ -5,6 +5,7 @@ import Control.Concurrent.Async (Async, async, cancel, waitCatchSTM)
 import Control.Exception        (bracket, evaluate)
 import Data.Char                (digitToInt, intToDigit, isHexDigit)
 import Data.Foldable            (asum, traverse_)
+import Data.List                (intersperse)
 import Data.Maybe               (fromMaybe, isJust)
 
 -- random
@@ -46,6 +47,12 @@ data Modality
 isGameOver :: Modality -> Bool
 isGameOver GameOver{} = True
 isGameOver _          = False
+
+activeAttr :: Attr
+activeAttr = defAttr `withStyle` bold
+
+inactiveAttr :: Attr
+inactiveAttr = defAttr `withForeColor` Color240 224
 
 main :: IO ()
 main =
@@ -198,35 +205,54 @@ drawApp app =
   string defAttr " Game Board  -  Available Pieces" <->
 
   drawQuarto (appMode app) (appQuarto app) <|>
-  char defAttr ' ' <|>
   pieceKey   (appMode app) (appQuarto app) <->
 
-  drawMode   (appMode app) <|> drawActivity (appAsync app) <->
+  drawCommands app <->
 
   if isGameOver (appMode app)
     then emptyImage
     else drawHint (appSearch app) (appHint app)
 
-drawMode :: Modality -> Image
-drawMode NoInput          = string defAttr "<Select position>"
-drawMode PosnInput     {} = string defAttr "<Select piece>"
-drawMode PosnPieceInput{} = string defAttr "<Press ENTER>"
-drawMode GameOver      {} = string defAttr "Game Over (new game: n)"
+drawCommands :: App -> Image
+drawCommands app =
+  modePart <->
+  horizCat (intersperse (char defAttr ' ') parts)
+  where
+    parts = quitPart : newgamePart : searchPart ++ hintPart
 
--- | Indicate if search thread is running and now affect that.
-drawActivity :: Maybe (Async ()) -> Image
-drawActivity Just{} =
-  string defAttr " ["                 <|>
-  char (defAttr `withStyle` bold) 'x' <|>
-  string defAttr " stop search]"
-drawActivity Nothing =
-  string defAttr " ["                 <|>
-  char (defAttr `withStyle` bold) '?' <|>
-  string defAttr " for hint]"
+    part x y = string activeAttr x <|> string defAttr (':':y)
+
+    quitPart = part "ESC" "quit"
+
+    newgamePart = part "n" "new-game"
+
+    hintPart =
+      case appHint app of
+        Just{}  -> [part "h" "use-hint"]
+        Nothing -> []
+
+    searchPart =
+      case appAsync app of
+        Just{}                             -> [part "x" "stop-search"]
+        Nothing | isGameOver (appMode app) -> []
+                | otherwise                -> [part "?" "start-search"]
+
+    modePart =
+      case appMode app of
+        NoInput          -> part "0-f" "position"
+        PosnInput     {} -> part "0-f" "piece"
+        PosnPieceInput{} -> part "ENTER" "confirm"
+        GameOver      {} -> string defAttr "Game Over"
+
 
 drawQuarto :: Modality -> Quarto -> Image
-drawQuarto inp q = renderGrid 4 4 edge cell
+drawQuarto inp q = renderGrid 4 4 2 edge cell
   where
+    posnAttr =
+      case inp of
+        NoInput -> activeAttr
+        _       -> inactiveAttr
+
     selected
       = map (\x -> C (x`mod`4) (x`div`4))
       $ map posnId
@@ -237,10 +263,11 @@ drawQuarto inp q = renderGrid 4 4 edge cell
           NoInput            -> []
 
     -- boundary of selection
-    edge c _     |      c `elem` selected = Just Heavy
-    edge c Horiz | up   c `elem` selected = Just Heavy
-    edge c Vert  | left c `elem` selected = Just Heavy
-    edge _ _                              = Just Thin
+    edge c Horiz = edge1 c up
+    edge c Vert  = edge1 c left
+    edge1 c f
+      | (c `elem` selected) /= (f c `elem` selected) = Just Heavy
+      | otherwise                                    = Just Thin
 
     cell (C col row) =
       let posn = Posn (row * 4 + col) in
@@ -251,23 +278,24 @@ drawQuarto inp q = renderGrid 4 4 edge cell
           pieceGlyph piece
         _ ->
           case pieceAt q posn of
-            Nothing    -> string defAttr (intToDigit (posnId posn) : " ")
+            Nothing    -> string posnAttr (intToDigit (posnId posn) : " ")
             Just piece -> pieceGlyph piece
 
 -- | Draw the available pieces and corresponding piece IDs
 pieceKey :: Modality -> Quarto -> Image
-pieceKey inp q =
-  vertCat
-    [ horizCat
-        [ if pieceUsed q piece || Just piece == picked
-          then charFill defAttr ' ' 5 1 <->
-               char defAttr '·'
-          else charFill defAttr ' ' 5 1 <->
-               string defAttr (intToDigit (pieceId piece) : " ") <|>
-               pieceGlyph piece
-      | piece <- Piece <$> [row .. row+3] ]
-    | row <- [0, 4 .. 12] ]
+pieceKey inp q = renderGrid 4 4 4 (\_ _ -> Nothing) $ \(C col row) ->
+  let piece = Piece (row*4+col) in
+  if pieceUsed q piece || Just piece == picked
+     then char defAttr '·' <|> charFill defAttr ' ' 3 1
+     else char keyAttr (intToDigit (pieceId piece)) <|>
+          char defAttr ' ' <|>
+          pieceGlyph piece
   where
+    keyAttr =
+      case inp of
+        PosnInput{} -> activeAttr
+        _           -> inactiveAttr
+
     picked = case inp of
                 PosnPieceInput _ p -> Just p
                 _                  -> Nothing
@@ -279,7 +307,7 @@ drawHint search hint =
   where
     searchPart =
       case search of
-        Nothing         -> string defAttr "No search result"
+        Nothing         -> emptyImage
         Just (depth, W) -> string defAttr ("Win in " ++ show depth)
         Just (depth, D) -> string defAttr ("Draw in " ++ show depth)
         Just (depth, L) -> string defAttr ("Lose in " ++ show depth)
@@ -296,17 +324,17 @@ drawHint search hint =
 
 drawPosn :: Posn -> Image
 drawPosn p =
-  char (defAttr `withStyle` bold) (intToDigit (posnId p))
+  char activeAttr (intToDigit (posnId p))
 
 drawPiece :: Piece -> Image
 drawPiece p =
-  char (defAttr `withStyle` bold) (intToDigit (pieceId p)) <|>
-  string defAttr " ["                                      <|>
-  pieceGlyph p                                             <|>
+  char activeAttr (intToDigit (pieceId p)) <|>
+  string defAttr " ["                      <|>
+  pieceGlyph p                             <|>
   char defAttr ']'
 
 pieceGlyph :: Piece -> Image
-pieceGlyph (Piece p) = string (defAttr `withForeColor` color `withStyle` bold) str
+pieceGlyph (Piece p) = string (defAttr `withForeColor` color) str
   where
     color = if p < 8 then green else red
     str =

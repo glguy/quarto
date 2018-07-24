@@ -196,10 +196,11 @@ boxChar _             _             _             _             = Nothing
 renderGrid ::
   Int                               {- ^ width      -} ->
   Int                               {- ^ height     -} ->
+  Int                               {- ^ cell width -} ->
   (Coord -> Orient -> Maybe Weight) {- ^ edge logic -} ->
   (Coord -> Image)                  {- ^ cell logic -} ->
   Image                             {- ^ grid lines -}
-renderGrid w h edge cell =
+renderGrid w h i edge cell =
   vertCat [ horizCat [render1 x y | x <- [0..w] ] | y <- [0..h] ]
   where
     box u d l r = fromMaybe ' ' (boxChar u d l r)
@@ -218,4 +219,4 @@ renderGrid w h edge cell =
 
         corner = char defAttr (box eU eD eL eR)
         edgeD  = char defAttr (box eD eD Nothing Nothing)
-        edgeR  = charFill defAttr (box Nothing Nothing eR eR) 2 1
+        edgeR  = charFill defAttr (box Nothing Nothing eR eR) i 1
