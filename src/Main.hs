@@ -309,7 +309,7 @@ drawQuarto inp q = renderGrid 4 4 2 edge cell
           pieceGlyph piece
         _ ->
           case pieceAt q posn of
-            Nothing    -> string posnAttr (intToDigit (posnId posn) : " ")
+            Nothing    -> char posnAttr (posnToChar posn)
             Just piece -> pieceGlyph piece
 
 -- | Draw the available pieces and corresponding piece IDs
@@ -318,7 +318,7 @@ pieceKey inp q = renderGrid 4 4 4 (\_ _ -> Nothing) $ \(C col row) ->
   let piece = Piece (row*4+col) in
   if pieceUsed q piece || Just piece == picked
      then char defAttr '·' <|> charFill defAttr ' ' 3 1
-     else char keyAttr (intToDigit (pieceId piece)) <|>
+     else char keyAttr (pieceToChar piece) <|>
           char defAttr ' ' <|>
           pieceGlyph piece
   where
@@ -348,12 +348,12 @@ drawHint search hint =
       case hint of
         Nothing -> emptyImage
         Just (posn, piece) ->
-          string defAttr ": position "                   <|>
-          char   activeAttr (intToDigit (posnId posn))   <|>
-          string defAttr " and piece "                   <|>
-          char   activeAttr (intToDigit (pieceId piece)) <|>
-          string defAttr " ["                            <|>
-          pieceGlyph piece                               <|>
+          string defAttr ": position "          <|>
+          char   activeAttr (posnToChar posn)   <|>
+          string defAttr " and piece "          <|>
+          char   activeAttr (pieceToChar piece) <|>
+          string defAttr " ["                   <|>
+          pieceGlyph piece                      <|>
           char   defAttr ']'
 
 
