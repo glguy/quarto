@@ -13,9 +13,12 @@ module BoxDrawing
   , renderGrid
   ) where
 
+-- base
 import Control.Monad (guard)
-import Data.List (transpose)
-import Data.Maybe (fromMaybe)
+import Data.List     (transpose)
+import Data.Maybe    (fromMaybe)
+
+-- vty
 import Graphics.Vty.Image
 import Graphics.Vty.Attributes
 
@@ -178,7 +181,7 @@ boxChar _             _             _             _             = Nothing
 -- output.
 --
 -- @
--- putStr (renderGrid 3 3
+-- putStr (renderGrid 3 3 1
 --            (\(C x y) o -> if even x && even y
 --                           || even x && o == Horiz
 --                           || even y && o == Vert

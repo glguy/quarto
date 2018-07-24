@@ -1,8 +1,28 @@
-module Game where
+module Game
+  ( Piece(..)
+  , Posn(..)
 
-import Data.Bits
+  -- * Game board and manipulations
+  , Quarto
+  , initialQuarto
+  , positionCovered
+  , pieceUsed
+  , setPieceAt
+  , pieceAt
+
+  -- * Game ending conditions
+  , checkWinAt
+  , isBoardFull
+  , winningPositions
+
+  -- * Game-tree search
+  , bestOutcome, Outcome(..)
+  ) where
+
+-- base
+import Data.Bits ((.&.), (.|.), setBit, shiftL, shiftR, testBit)
 import Data.List (find)
-import Data.Word
+import Data.Word (Word64)
 
 -- | Pieces are represented as a number in the range @0@ to @15@.
 -- These piece numbers can be represented in 4 bits with each
@@ -11,6 +31,7 @@ import Data.Word
 -- In the physical game these attributes are height, color, shape, solid.
 newtype Piece = Piece { pieceId :: Int }
   deriving (Eq, Show)
+
 
 -- | Positions on the board are represented by a number in the range
 -- @0@ to @15@ laid out as follows (using hexadecimal digits):
@@ -181,7 +202,7 @@ candidateFours (Posn i) =
 -- | Result of searching the game tree with 'bestOutcome'
 data Outcome
   = Lose                -- All moves lead to loss
-  | Draw [(Piece,Posn)] -- Moves that lead to a draw
+  | Draw [(Posn,Piece)] -- Moves that lead to a draw
   | Win !Piece !Posn    -- Move that leads to a win
   deriving (Show)
 
@@ -210,5 +231,4 @@ bestOutcome' depth xs0
           case bestOutcome (depth-1) q of
             Lose{} -> Win piece posn -- opponent's loss is our win
             Win {} -> go draws xs    -- opponent's win is our loss
-            Draw{} -> go ((piece,posn):draws) xs
-
+            Draw{} -> go ((posn,piece):draws) xs
