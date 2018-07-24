@@ -51,7 +51,7 @@ main :: IO ()
 main =
   newTChanIO >>= \tchan ->
   bracket (mkVty mempty) shutdown $ \vty ->
-  main' =<< doAI App
+  main' App
     { appVty    = vty
     , appQuarto = initialQuarto
     , appMode   = NoInput
@@ -80,25 +80,30 @@ main' app =
   do doDraw app
      ev <- getEvent app
      case ev of
+
        AsyncFinished -> main' app { appAsync = Nothing }
+
        VtyEvent vtyEvent -> doVtyEvent app vtyEvent
 
        HintEvent hint ->
          case hint of
 
            (depth, Draw []) ->
-             main' app { appHint = Nothing
-                       , appSearch = Just (depth, D) }
+             main' app
+               { appHint   = Nothing
+               , appSearch = Just (depth, D) }
 
            (depth, Draw xs) ->
              do i <- randomRIO (0, length xs - 1)
                 let (piece,posn) = xs !! i
-                main' app { appHint = Just (posn, piece)
-                          , appSearch = Just (depth, D) }
+                main' app
+                  { appHint   = Just (posn, piece)
+                  , appSearch = Just (depth, D) }
 
            (depth, Win piece posn) ->
-             main' app { appHint = Just (posn, piece)
-                       , appSearch = Just (depth, W) }
+             main' app
+               { appHint   = Just (posn, piece)
+               , appSearch = Just (depth, W) }
 
            (depth, Lose) ->
                main' app { appSearch = Just (depth, L) }
@@ -129,6 +134,10 @@ doVtyEvent app ev =
        (EvKey KBS [], PosnPieceInput posn _) ->
          main' app { appMode = PosnInput posn }
 
+       -- Start AI
+       (EvKey (KChar '?') [], _) ->
+         main' =<< doAI app
+
        -- Stop AI
        (EvKey (KChar 'x') [], _) ->
          do traverse_ cancel (appAsync app)
@@ -143,10 +152,12 @@ doVtyEvent app ev =
        -- Restart
        (EvKey (KChar 'n') [], _) ->
          do traverse_ cancel (appAsync app)
-            main' =<< doAI app { appAsync  = Nothing
-                               , appHint   = Nothing
-                               , appQuarto = initialQuarto
-                               , appMode   = NoInput }
+            main' app
+              { appAsync  = Nothing
+              , appHint   = Nothing
+              , appSearch = Nothing
+              , appQuarto = initialQuarto
+              , appMode   = NoInput }
 
        -- 1. Choose a position
        (EvKey (KChar c) [], NoInput)
@@ -170,9 +181,13 @@ doVtyEvent app ev =
                       GameOver (fromMaybe [] (winningPositions posn quarto))
                   | isBoardFull quarto = GameOver []
                   | otherwise = NoInput
-            main' =<< doAI app { appMode     = newMode
-                               , appQuarto   = quarto
-                               , appHint     = Nothing }
+            traverse_ cancel (appAsync app)
+            main' app
+              { appMode   = newMode
+              , appQuarto = quarto
+              , appHint   = Nothing
+              , appSearch = Nothing
+              , appAsync  = Nothing }
 
        -- Ignore everything else
        _ -> main' app
@@ -244,18 +259,20 @@ drawHint running search hint =
   horizCat [searchPart, movePart, runningPart]
 
   where
-    runningPart = if running then string defAttr " [thinking]" else emptyImage
+    runningPart = string defAttr
+                $ if running then " [thinking: press x to stop]"
+                             else " [press ? to search]"
 
     searchPart =
       case search of
-        Nothing         -> string defAttr "No search result "
+        Nothing         -> string defAttr "No search result"
         Just (depth, W) -> string defAttr ("Win in " ++ show depth)
         Just (depth, D) -> string defAttr ("Draw in " ++ show depth)
         Just (depth, L) -> string defAttr ("Lose in " ++ show depth)
 
     movePart =
       case hint of
-        Nothing -> string defAttr ": no suggestion"
+        Nothing -> emptyImage
         Just (posn, piece) ->
           string defAttr ": position " <|>
           drawPosn posn                <|>
