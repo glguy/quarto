@@ -39,24 +39,24 @@ horizCat :: [Drawing a] -> Drawing a
 horizCat = foldr (:|||) emptyImage
 
 coordRegions :: Coord -> Drawing a -> [a]
-coordRegions c d = let (_,_,rs) = go c d in rs
+coordRegions (C x0 y0) d = case go x0 y0 d of (_,_,rs) -> rs
   where
-    go :: Coord -> Drawing a -> (Int, Int, [a])
+    go _ _ (Image i) = (Vty.imageWidth i, Vty.imageHeight i, [])
 
-    go (C x y) (Image i) = (Vty.imageWidth i, Vty.imageHeight i, [])
-
-    go c@(C x y) (Region r i) =
-      case go c i of
+    go x y (Region r a) =
+      case go x y a of
         (w,h,rs) -> (w,h,if x < w && y < h then r:rs else [])
 
-    go c@(C x y) (a :||| b) =
-      case go c a of
+    go x y (a :||| b) =
+      case go x y a of
         (w_a,h_a,rs_a) ->
-          case go (C (x - w_a) y) b of
-            (w_b,h_b,rs_b) -> (w_a + w_b, max h_a h_b, if x < w_a then rs_a else rs_b)
+          case go (x - w_a) y b of
+            (w_b,h_b,rs_b) ->
+              (w_a + w_b, max h_a h_b, if x < w_a then rs_a else rs_b)
 
-    go c@(C x y) (a :--- b) =
-      case go c a of
+    go x y (a :--- b) =
+      case go x y a of
         (w_a,h_a,rs_a) ->
-          case go (C x (y - h_a)) b of
-            (w_b,h_b,rs_b) -> (max w_a w_b, h_a + h_b, if y < h_a then rs_a else rs_b)
+          case go x (y - h_a) b of
+            (w_b,h_b,rs_b) ->
+              (max w_a w_b, h_a + h_b, if y < h_a then rs_a else rs_b)
