@@ -109,9 +109,9 @@ isBoardFull (Quarto x _) = testAllSet x 0x1111111111111111
 
 -- END OF BIT FIDDLING -------------------------------------------------
 
-possibleMoves :: Quarto -> [(Piece, Posn, Quarto)]
+possibleMoves :: Quarto -> [(Posn, Piece, Quarto)]
 possibleMoves q =
-  [ q' `seq` (piece, posn, q')
+  [ q' `seq` (posn, piece, q')
      | piece <- Piece <$> [0 .. 0xf], not (pieceUsed q piece)
      , posn  <- Posn  <$> [0 .. 0xf], not (positionCovered q posn)
      , let q' = setPieceAt piece posn q
@@ -203,7 +203,7 @@ candidateFours (Posn i) =
 data Outcome
   = Lose                -- All moves lead to loss
   | Draw [(Posn,Piece)] -- Moves that lead to a draw
-  | Win !Piece !Posn    -- Move that leads to a win
+  | Win !Posn !Piece    -- Move that leads to a win
   deriving (Show)
 
 -- | Consider sequences of moves up to the given depth. Determines the
@@ -217,7 +217,7 @@ bestOutcome depth start = bestOutcome' depth (possibleMoves start)
 
 bestOutcome' ::
   Int                     {- ^ fuel             -} ->
-  [(Piece, Posn, Quarto)] {- ^ possible futures -} ->
+  [(Posn, Piece, Quarto)] {- ^ possible futures -} ->
   Outcome                 {- ^ best outcome     -}
 bestOutcome' depth xs0
   | depth == 0 || null xs0 = Draw []
@@ -225,10 +225,10 @@ bestOutcome' depth xs0
   where
     go draws [] | null draws = Lose -- no draws means we skipped over a Win
                 | otherwise  = Draw draws
-    go draws ((piece,posn,q):xs)
-      | checkWinAt posn q = Win piece posn
+    go draws ((posn,piece,q):xs)
+      | checkWinAt posn q = Win posn piece
       | otherwise =
           case bestOutcome (depth-1) q of
-            Lose{} -> Win piece posn -- opponent's loss is our win
+            Lose{} -> Win posn piece -- opponent's loss is our win
             Win {} -> go draws xs    -- opponent's win is our loss
             Draw{} -> go ((posn,piece):draws) xs
