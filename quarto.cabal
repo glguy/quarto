@@ -24,7 +24,7 @@ cabal-version:       >=1.10
 
 executable quarto
   main-is:             Main.hs
-  other-modules:       BoxDrawing, Coord, Game
+  other-modules:       BoxDrawing, Coord, Game, Drawing
   ghc-options:         -O2 -threaded
   hs-source-dirs:      src
 

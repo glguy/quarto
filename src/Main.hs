@@ -16,12 +16,15 @@ import Control.Concurrent.STM
          (TQueue, newTQueueIO, readTChan, readTQueue, atomically, retry, writeTQueue)
 
 -- vty
-import Graphics.Vty
+import Graphics.Vty (Config(..), Vty(..), mkVty, picForImage)
+import Graphics.Vty.Attributes
+import Graphics.Vty.Input
 
 -- local
 import Coord
 import BoxDrawing
 import Game
+import Drawing
 
 -- | State of application
 data App = App
@@ -43,6 +46,17 @@ data Modality
   | PosnPieceInput Posn Piece
   | GameOver [Posn] -- list of positions to highlight
   deriving Show
+
+addPosition :: Posn -> Modality -> Modality
+addPosition posn NoInput                  = PosnInput posn
+addPosition posn (PosnInput _)            = PosnInput posn
+addPosition posn (PosnPieceInput _ piece) = PosnPieceInput posn piece
+addPosition _    mode                     = mode
+
+addPiece :: Piece -> Modality -> Modality
+addPiece piece (PosnInput posn)        = PosnPieceInput posn piece
+addPiece piece (PosnPieceInput posn _) = PosnPieceInput posn piece
+addPiece _     mode                    = mode
 
 isGameOver :: Modality -> Bool
 isGameOver GameOver{} = True
@@ -78,10 +92,13 @@ posnFromChar c
 
 ------------------------------------------------------------------------
 
+vtyConfig :: Config
+vtyConfig = mempty { mouseMode = Just True }
+
 main :: IO ()
 main =
   newTQueueIO >>= \tchan ->
-  bracket (mkVty mempty) shutdown $ \vty ->
+  bracket (mkVty vtyConfig) shutdown $ \vty ->
   main' App
     { appVty    = vty
     , appQuarto = initialQuarto
@@ -97,6 +114,17 @@ data AppEvent
   = VtyEvent Event
   | HintEvent (Int,Outcome)
   | AsyncFinished
+
+data UIEvent
+  = PickPiece Piece
+  | PickPosn Posn
+  | Cancel
+  | Confirm
+  | NewGame
+  | UseHint
+  | StartSearch
+  | StopSearch
+  | Quit
 
 getEvent :: App -> IO AppEvent
 getEvent app =
@@ -115,11 +143,21 @@ main' app =
      case ev of
        AsyncFinished              -> main' app { appAsync = Nothing }
        HintEvent (depth, outcome) -> main' =<< doHintEvent app depth outcome
-       VtyEvent (EvKey key [])    -> resume =<< doKeyEvent app key
-       VtyEvent _                 -> main' app
+       VtyEvent (EvKey key [])
+         | Just event <- keyToEvent (appMode app) key -> resume =<< doUIEvent app event
+       VtyEvent (EvMouseDown x y BLeft [])
+         | Just event <- getClickEvent app x y -> resume =<< doUIEvent app event
+       VtyEvent _ -> main' app
   where
     resume Nothing    = return ()
     resume (Just app) = main' app
+
+getClickEvent :: App -> Int -> Int -> Maybe UIEvent
+getClickEvent app x y
+  | null keys = Nothing
+  | otherwise = Just $! last keys
+  where
+    keys = coordRegions (C x y) (drawApp app)
 
 doHintEvent ::
   App     {- ^ application state             -} ->
@@ -148,39 +186,50 @@ doHintEvent app depth outcome =
     Lose ->
       return app { appSearch = Just (depth, L) }
 
+keyToEvent :: Modality -> Key -> Maybe UIEvent
+keyToEvent mode key =
+  case key of
+    KEsc      -> Just Quit
+    KBS       -> Just Cancel
+    KEnter    -> Just Confirm
+    KChar '?' -> Just StartSearch
+    KChar 'x' -> Just StopSearch
+    KChar 'h' -> Just UseHint
+    KChar 'n' -> Just NewGame
+    KChar c
+      | NoInput     <- mode -> PickPosn  <$> posnFromChar c
+      | PosnInput{} <- mode -> PickPiece <$> pieceFromChar c
+    _ -> Nothing
 
-doKeyEvent :: App -> Key -> IO (Maybe App)
-doKeyEvent app key =
+doUIEvent :: App -> UIEvent -> IO (Maybe App)
+doUIEvent app event =
   let continue = return . Just in
-  case (key, appMode app) of
+  case event of
 
     -- Quit
-    (KEsc, _) -> return Nothing -- exit event loop
+    Quit -> return Nothing -- exit event loop
 
-    -- Cancel position choice
-    (KBS, PosnInput _) ->
-      continue app { appMode = NoInput }
-
-    -- Cancel piece choice
-    (KBS, PosnPieceInput posn _) ->
-      continue app { appMode = PosnInput posn }
+    -- Cancel previous choice
+    Cancel
+      | PosnInput{}        <- appMode app -> continue app { appMode = NoInput }
+      | PosnPieceInput p _ <- appMode app -> continue app { appMode = PosnInput p }
 
     -- Start AI
-    (KChar '?', _) -> continue =<< doAI app
+    StartSearch -> continue =<< doAI app
 
     -- Stop AI
-    (KChar 'x', _) ->
+    StopSearch ->
       do traverse_ cancel (appAsync app)
          continue app { appAsync = Nothing }
 
     -- Use hint as input
-    (KChar 'h', mode)
-      | not (isGameOver mode)
+    UseHint
+      | not (isGameOver (appMode app))
       , Just (posn, piece) <- appHint app ->
         continue app { appMode = PosnPieceInput posn piece }
 
     -- Restart
-    (KChar 'n', _) ->
+    NewGame ->
       do traverse_ cancel (appAsync app)
          continue app
            { appAsync  = Nothing
@@ -190,20 +239,18 @@ doKeyEvent app key =
            , appMode   = NoInput }
 
     -- 1. Choose a position
-    (KChar c, NoInput)
-      | Just posn <- posnFromChar c
-      , not (positionCovered (appQuarto app) posn) ->
-      continue app { appMode = PosnInput posn }
+    PickPosn posn
+      | not (positionCovered (appQuarto app) posn) ->
+      continue app { appMode = addPosition posn (appMode app) }
 
     -- 2. Choose a piece
-    (KChar c, PosnInput posn)
-      | isHexDigit c
-      , let piece = Piece (digitToInt c)
-      , not (pieceUsed (appQuarto app) piece) ->
-      continue app { appMode = PosnPieceInput posn piece }
+    PickPiece piece
+      | not (pieceUsed (appQuarto app) piece) ->
+      continue app { appMode = addPiece piece (appMode app) }
 
     -- 3. Confirm placement
-    (KEnter, PosnPieceInput posn piece) ->
+    Confirm
+      | PosnPieceInput posn piece <- appMode app ->
       do let quarto   = setPieceAt piece posn (appQuarto app)
              newMode
                | checkWinAt posn quarto =
@@ -226,57 +273,58 @@ doKeyEvent app key =
 
 -- | Update the terminal display with the current application rendering.
 doDraw :: App -> IO ()
-doDraw app = update (appVty app) (picForImage (drawApp app))
+doDraw app = update (appVty app) (picForImage (drawingToImage (drawApp app)))
 
 -- | Render the whole UI.
-drawApp :: App -> Image
+drawApp :: App -> Drawing UIEvent
 drawApp app =
-  string defAttr " Game Board  -  Available Pieces" <->
+  string defAttr " Game Board  -  Available Pieces" :---
 
-  drawQuarto (appMode app) (appQuarto app) <|>
-  pieceKey   (appMode app) (appQuarto app) <->
+  drawQuarto (appMode app) (appQuarto app) :|||
+  pieceKey   (appMode app) (appQuarto app) :---
 
-  drawCommands app <->
+  drawCommands app :---
 
   if isGameOver (appMode app)
     then emptyImage
     else drawHint (appSearch app) (appHint app)
 
 -- | Render the currently available keyboard commands.
-drawCommands :: App -> Image
+drawCommands :: App -> Drawing UIEvent
 drawCommands app =
-  modePart <->
+  modePart :---
   horizCat (intersperse (char defAttr ' ') parts)
   where
     parts = quitPart : newgamePart : searchPart ++ hintPart
 
-    part x y = string activeAttr x <|> string defAttr (':':y)
+    part x y = string activeAttr x :||| string defAttr (':':y)
 
-    quitPart = part "ESC" "quit"
+    quitPart = Region Quit (part "ESC" "quit")
 
-    newgamePart = part "n" "new-game"
+    newgamePart = Region NewGame (part "n" "new-game")
 
     hintPart =
       case appHint app of
-        Just{}  -> [part "h" "use-hint"]
+        Just{}  -> [Region UseHint (part "h" "use-hint")]
         Nothing -> []
 
     searchPart =
       case appAsync app of
-        Just{}                             -> [part "x" "stop-search"]
-        Nothing | isGameOver (appMode app) -> []
-                | otherwise                -> [part "?" "start-search"]
+        Just{} -> [Region StopSearch (part "x" "stop-search")]
+        Nothing
+          | isGameOver (appMode app) -> []
+          | otherwise -> [Region StartSearch (part "?" "start-search")]
 
     modePart =
       case appMode app of
         NoInput          -> part "0-f" "position"
         PosnInput     {} -> part "0-f" "piece"
-        PosnPieceInput{} -> part "ENTER" "confirm"
+        PosnPieceInput{} -> Region Confirm (part "ENTER" "confirm")
         GameOver      {} -> string defAttr "Game Over"
 
 
 -- | Render the game board.
-drawQuarto :: Modality -> Quarto -> Image
+drawQuarto :: Modality -> Quarto -> Drawing UIEvent
 drawQuarto inp q = renderGrid 4 4 2 edge cell
   where
     posnAttr =
@@ -309,17 +357,19 @@ drawQuarto inp q = renderGrid 4 4 2 edge cell
           pieceGlyph piece
         _ ->
           case pieceAt q posn of
-            Nothing    -> char posnAttr (posnToChar posn)
+            Nothing    -> Region (PickPosn posn)
+                        $ string posnAttr [posnToChar posn,' ']
             Just piece -> pieceGlyph piece
 
 -- | Draw the available pieces and corresponding piece IDs
-pieceKey :: Modality -> Quarto -> Image
+pieceKey :: Modality -> Quarto -> Drawing UIEvent
 pieceKey inp q = renderGrid 4 4 4 (\_ _ -> Nothing) $ \(C col row) ->
   let piece = Piece (row*4+col) in
   if pieceUsed q piece || Just piece == picked
-     then char defAttr '·' <|> charFill defAttr ' ' 3 1
-     else char keyAttr (pieceToChar piece) <|>
-          char defAttr ' ' <|>
+     then char defAttr '·' :||| string defAttr (replicate 3 ' ')
+     else Region (PickPiece piece)
+        $ char keyAttr (pieceToChar piece) :|||
+          char defAttr ' ' :|||
           pieceGlyph piece
   where
     keyAttr =
@@ -332,7 +382,7 @@ pieceKey inp q = renderGrid 4 4 4 (\_ _ -> Nothing) $ \(C col row) ->
                 _                  -> Nothing
 
 -- | Render the hint search results.
-drawHint :: Maybe (Int, Result) -> Maybe (Posn, Piece) -> Image
+drawHint :: Maybe (Int, Result) -> Maybe (Posn, Piece) -> Drawing UIEvent
 drawHint search hint =
   horizCat [searchPart, movePart]
 
@@ -348,17 +398,16 @@ drawHint search hint =
       case hint of
         Nothing -> emptyImage
         Just (posn, piece) ->
-          string defAttr ": position "          <|>
-          char   activeAttr (posnToChar posn)   <|>
-          string defAttr " and piece "          <|>
-          char   activeAttr (pieceToChar piece) <|>
-          string defAttr " ["                   <|>
-          pieceGlyph piece                      <|>
+          string defAttr ": position "          :|||
+          char   activeAttr (posnToChar posn)   :|||
+          string defAttr " and piece "          :|||
+          char   activeAttr (pieceToChar piece) :|||
+          string defAttr " ["                   :|||
+          pieceGlyph piece                      :|||
           char   defAttr ']'
 
-
 -- | Render a single piece as a glyph capturing its various attributes.
-pieceGlyph :: Piece -> Image
+pieceGlyph :: Piece -> Drawing UIEvent
 pieceGlyph (Piece p) = string (defAttr `withForeColor` color) str
   where
     color = if p < 8 then green else red

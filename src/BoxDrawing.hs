@@ -19,10 +19,10 @@ import Data.List     (transpose)
 import Data.Maybe    (fromMaybe)
 
 -- vty
-import Graphics.Vty.Image
 import Graphics.Vty.Attributes
 
 import Coord
+import Drawing
 
 -- | Indicates line style
 data Weight
@@ -201,8 +201,8 @@ renderGrid ::
   Int                               {- ^ height     -} ->
   Int                               {- ^ cell width -} ->
   (Coord -> Orient -> Maybe Weight) {- ^ edge logic -} ->
-  (Coord -> Image)                  {- ^ cell logic -} ->
-  Image                             {- ^ grid lines -}
+  (Coord -> Drawing a)              {- ^ cell logic -} ->
+  Drawing a                         {- ^ grid lines -}
 renderGrid w h i edge cell =
   vertCat [ horizCat [render1 x y | x <- [0..w] ] | y <- [0..h] ]
   where
@@ -210,9 +210,8 @@ renderGrid w h i edge cell =
 
     check p x = if p then x else emptyImage
 
-    render1 :: Int -> Int -> Image
-    render1 x y = corner <|> check (x<w) edgeR
-              <-> check (y<h) (edgeD <|> check (x<w) (cell c))
+    render1 x y = corner :||| check (x<w) edgeR
+             :--- check (y<h) (edgeD :||| check (x<w) (cell c))
       where
         c  = C x y
         eR = guard (x<w) >> edge c        Horiz
@@ -222,4 +221,4 @@ renderGrid w h i edge cell =
 
         corner = char defAttr (box eU eD eL eR)
         edgeD  = char defAttr (box eD eD Nothing Nothing)
-        edgeR  = charFill defAttr (box Nothing Nothing eR eR) i 1
+        edgeR  = string defAttr (replicate i (box Nothing Nothing eR eR))
