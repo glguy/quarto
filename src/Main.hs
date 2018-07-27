@@ -3,17 +3,19 @@ module Main (main) where
 -- base
 import Control.Concurrent.Async (Async, async, cancel, waitCatchSTM)
 import Control.Exception        (bracket, evaluate)
-import Data.Char                (digitToInt, intToDigit, isHexDigit)
+import Control.Monad            (guard, unless)
+import Data.Char                (intToDigit)
 import Data.Foldable            (asum, traverse_)
 import Data.List                (intersperse)
-import Data.Maybe               (fromMaybe, isJust)
+import Data.Maybe               (fromMaybe, listToMaybe, isJust)
 
 -- random
 import System.Random (randomRIO)
 
 -- stm
 import Control.Concurrent.STM
-         (TQueue, newTQueueIO, readTChan, readTQueue, atomically, retry, writeTQueue)
+         (STM, TQueue, newTQueueIO, readTChan, readTQueue, atomically,
+          retry, writeTQueue, registerDelay, readTVar)
 
 -- vty
 import Graphics.Vty (Config(..), Vty(..), mkVty, picForImage)
@@ -28,13 +30,15 @@ import Drawing
 
 -- | State of application
 data App = App
-  { appVty    :: Vty                    -- ^ terminal handle
-  , appQuarto :: Quarto                 -- ^ game board
-  , appMode   :: Modality               -- ^ application input mode
-  , appSearch :: Maybe (Int, Result)    -- ^ most recent search result
-  , appHint   :: Maybe (Posn, Piece)    -- ^ most recent move hint
-  , appAsync  :: Maybe (Async ())       -- ^ handle to search thread
+  { appVty     :: Vty                   -- ^ terminal handle
+  , appQuarto  :: Quarto                -- ^ game board
+  , appMode    :: Modality              -- ^ application input mode
+  , appSearch  :: Maybe (Int, Result)   -- ^ most recent search result
+  , appHint    :: Maybe (Posn, Piece)   -- ^ most recent move hint
+  , appAsync   :: Maybe (Async ())      -- ^ handle to search thread
   , appChannel :: TQueue (Int, Outcome) -- ^ results from search thread
+  , appTimer   :: STM ()                -- ^ stm action that succeeds when timer ready
+  , appCounter :: !Int                  -- ^ counter used to animate game over
   }
 
 -- | The result of a search can indicate: Win, Lose, and Draw
@@ -43,22 +47,9 @@ data Result = W | L | D
 -- | Type of modes of the application. These determine how the application
 -- will respond to terminal inputs.
 data Modality
-  = NoInput
-  | PosnInput Posn
-  | PosnPieceInput Posn Piece
+  = Active (Maybe Posn) (Maybe Piece)
   | GameOver [Posn] -- list of positions to highlight
   deriving Show
-
-addPosition :: Posn -> Modality -> Modality
-addPosition posn NoInput                  = PosnInput posn
-addPosition posn (PosnInput _)            = PosnInput posn
-addPosition posn (PosnPieceInput _ piece) = PosnPieceInput posn piece
-addPosition _    mode                     = mode
-
-addPiece :: Piece -> Modality -> Modality
-addPiece piece (PosnInput posn)        = PosnPieceInput posn piece
-addPiece piece (PosnPieceInput posn _) = PosnPieceInput posn piece
-addPiece _     mode                    = mode
 
 -- | Predicate for the 'GameOver' mode.
 isGameOver :: Modality -> Bool
@@ -80,18 +71,8 @@ inactiveAttr = defAttr `withForeColor` Color240 224
 pieceToChar :: Piece -> Char
 pieceToChar = intToDigit . pieceId
 
-pieceFromChar :: Char -> Maybe Piece
-pieceFromChar c
-  | isHexDigit c = Just $! Piece (digitToInt c)
-  | otherwise    = Nothing
-
 posnToChar :: Posn -> Char
 posnToChar = intToDigit . posnId
-
-posnFromChar :: Char -> Maybe Posn
-posnFromChar c
-  | isHexDigit c = Just $! Posn (digitToInt c)
-  | otherwise    = Nothing
 
 ------------------------------------------------------------------------
 
@@ -104,13 +85,16 @@ main =
   newTQueueIO >>= \tchan ->
   bracket (mkVty vtyConfig) shutdown $ \vty ->
   main' App
-    { appVty    = vty
-    , appQuarto = initialQuarto
-    , appMode   = NoInput
-    , appSearch = Nothing
-    , appHint   = Nothing
-    , appAsync  = Nothing
-    , appChannel = tchan }
+    { appVty     = vty
+    , appQuarto  = initialQuarto
+    , appMode    = Active Nothing Nothing
+    , appSearch  = Nothing
+    , appHint    = Nothing
+    , appAsync   = Nothing
+    , appChannel = tchan
+    , appTimer   = noTimer
+    , appCounter = 0 }
+
 
 -- application events --------------------------------------------------
 
@@ -119,11 +103,12 @@ data AppEvent
   = VtyEvent Event          -- terminal event
   | HintEvent (Int,Outcome) -- result from search
   | AsyncFinished           -- search thread exited
+  | TimerEvent              -- timer fired
 
 data UIEvent
   = PickPiece Piece
   | PickPosn Posn
-  | Cancel
+  | Clear
   | Confirm
   | NewGame
   | UseHint
@@ -137,7 +122,8 @@ getEvent app =
   atomically $ asum
     [ VtyEvent      <$> readTChan (_eventChannel (inputIface (appVty app)))
     , HintEvent     <$> readTQueue (appChannel app)
-    , AsyncFinished <$  maybe retry waitCatchSTM (appAsync app) ]
+    , AsyncFinished <$  maybe retry waitCatchSTM (appAsync app)
+    , TimerEvent    <$  appTimer app ]
 
 ------------------------------------------------------------------------
 
@@ -149,14 +135,20 @@ main' app =
      case ev of
        AsyncFinished              -> main' app { appAsync = Nothing }
        HintEvent (depth, outcome) -> main' =<< doHintEvent app depth outcome
-       VtyEvent (EvKey key [])
-         | Just event <- keyToEvent (appMode app) key -> resume =<< doUIEvent app event
-       VtyEvent (EvMouseDown x y BLeft [])
-         | Just event <- getClickEvent app x y -> resume =<< doUIEvent app event
-       VtyEvent _ -> main' app
+       VtyEvent event             -> resume =<< doVtyEvent app event
+       TimerEvent                 -> main' =<< doTimerEvent app
   where
-    resume Nothing    = return ()
-    resume (Just app) = main' app
+    resume Nothing     = return ()
+    resume (Just app') = main' app'
+
+
+doVtyEvent :: App -> Event -> IO (Maybe App)
+doVtyEvent app event =
+  case event of
+    EvKey KEsc [] -> return Nothing
+    EvMouseDown x y BLeft []
+      | Just uiEvent <- getClickEvent app x y -> doUIEvent app uiEvent
+    _ -> return (Just app)
 
 getClickEvent :: App -> Int -> Int -> Maybe UIEvent
 getClickEvent app x y
@@ -164,6 +156,14 @@ getClickEvent app x y
   | otherwise = Just $! last keys
   where
     keys = coordRegions (C x y) (drawApp app)
+
+
+doTimerEvent :: App -> IO App
+doTimerEvent app =
+  do timer <- newTimer
+     return app
+       { appTimer = timer
+       , appCounter = appCounter app + 1 }
 
 -- | Handle the events generated by the hint search thread.
 doHintEvent ::
@@ -193,20 +193,6 @@ doHintEvent app depth outcome =
     Lose ->
       return app { appSearch = Just (depth, L) }
 
-keyToEvent :: Modality -> Key -> Maybe UIEvent
-keyToEvent mode key =
-  case key of
-    KEsc      -> Just Quit
-    KBS       -> Just Cancel
-    KEnter    -> Just Confirm
-    KChar '?' -> Just StartSearch
-    KChar 'x' -> Just StopSearch
-    KChar 'h' -> Just UseHint
-    KChar 'n' -> Just NewGame
-    KChar c
-      | NoInput     <- mode -> PickPosn  <$> posnFromChar c
-      | PosnInput{} <- mode -> PickPiece <$> pieceFromChar c
-    _ -> Nothing
 
 -- | Handle the events generated by the terminal
 doUIEvent :: App -> UIEvent -> IO (Maybe App)
@@ -217,10 +203,8 @@ doUIEvent app event =
     -- Quit
     Quit -> return Nothing -- exit event loop
 
-    -- Cancel previous choice
-    Cancel
-      | PosnInput{}        <- appMode app -> continue app { appMode = NoInput }
-      | PosnPieceInput p _ <- appMode app -> continue app { appMode = PosnInput p }
+    -- Clear previous choices
+    Clear | Active{} <- appMode app -> continue app { appMode = Active Nothing Nothing }
 
     -- Start AI
     StartSearch -> continue =<< doAI app
@@ -232,9 +216,8 @@ doUIEvent app event =
 
     -- Use hint as input
     UseHint
-      | not (isGameOver (appMode app))
-      , Just (posn, piece) <- appHint app ->
-        continue app { appMode = PosnPieceInput posn piece }
+      | Just (posn, piece) <- appHint app ->
+        continue app { appMode = Active (Just posn) (Just piece) }
 
     -- Restart
     NewGame ->
@@ -244,37 +227,54 @@ doUIEvent app event =
            , appHint   = Nothing
            , appSearch = Nothing
            , appQuarto = initialQuarto
-           , appMode   = NoInput }
+           , appMode   = Active Nothing Nothing
+           , appTimer  = noTimer }
 
     -- 1. Choose a position
     PickPosn posn
-      | not (positionCovered (appQuarto app) posn) ->
-      continue app { appMode = addPosition posn (appMode app) }
+      | Active _ piece <- appMode app
+      , not (positionCovered (appQuarto app) posn) ->
+      continue app { appMode = Active (Just posn) piece }
 
     -- 2. Choose a piece
     PickPiece piece
-      | not (pieceUsed (appQuarto app) piece) ->
-      continue app { appMode = addPiece piece (appMode app) }
+      | Active posn _ <- appMode app
+      , not (pieceUsed (appQuarto app) piece) ->
+      continue app { appMode = Active posn (Just piece) }
 
     -- 3. Confirm placement
     Confirm
-      | PosnPieceInput posn piece <- appMode app ->
+      | Active (Just posn) (Just piece) <- appMode app ->
       do let quarto   = setPieceAt piece posn (appQuarto app)
+             gameWon = checkWinAt posn quarto
              newMode
-               | checkWinAt posn quarto =
+               | gameWon =
                    GameOver (fromMaybe [] (winningPositions posn quarto))
                | isBoardFull quarto = GameOver []
-               | otherwise = NoInput
+               | otherwise = Active Nothing Nothing
+         timer <- if gameWon then newTimer else return noTimer
          traverse_ cancel (appAsync app)
          continue app
            { appMode   = newMode
            , appQuarto = quarto
            , appHint   = Nothing
            , appSearch = Nothing
-           , appAsync  = Nothing }
+           , appAsync  = Nothing
+           , appCounter = 0
+           , appTimer  = timer }
 
     -- Ignore everything else
     _ -> continue app
+
+-- Timers --------------------------------------------------------------
+
+newTimer :: IO (STM ())
+newTimer =
+  do var <- registerDelay 400000
+     return (flip unless retry =<< readTVar var)
+
+noTimer :: STM ()
+noTimer = retry
 
 
 -- Application UI rendering --------------------------------------------
@@ -288,7 +288,7 @@ drawApp :: App -> Drawing UIEvent
 drawApp app =
   string defAttr " Game Board  -  Available Pieces" :---
 
-  drawQuarto (appMode app) (appQuarto app) :|||
+  drawQuarto (appCounter app) (appMode app) (appQuarto app) :|||
   pieceKey   (appMode app) (appQuarto app) :---
 
   drawCommands app :---
@@ -299,55 +299,54 @@ drawApp app =
 
 -- | Render the currently available keyboard commands.
 drawCommands :: App -> Drawing UIEvent
-drawCommands app =
-  modePart :---
-  horizCat (intersperse (char defAttr ' ') parts)
+drawCommands app = modePart :--- build commonButtons
   where
-    parts = quitPart : newgamePart : searchPart ++ hintPart
+    build = horizCat . intersperse (char defAttr ' ')
 
-    part x y = string activeAttr x :||| string defAttr (':':y)
+    commonButtons = [quitButton, newgameButton, hintButton, searchButton]
 
-    quitPart = Region Quit (part "ESC" "quit")
+    button action txt = maybe id Region action img
+      where
+        attr = if isJust action then activeAttr else inactiveAttr
+        img = char defAttr '[' :|||
+              string attr txt  :|||
+              char defAttr ']'
 
-    newgamePart = Region NewGame (part "n" "new-game")
-
-    hintPart =
-      case appHint app of
-        Just{}  -> [Region UseHint (part "h" "use-hint")]
-        Nothing -> []
-
-    searchPart =
+    quitButton    = button (Just Quit) "quit"
+    newgameButton = button (Just NewGame) "new-game"
+    hintButton    = button (UseHint <$ appHint app) "use-hint"
+    searchButton =
       case appAsync app of
-        Just{} -> [Region StopSearch (part "x" "stop-search")]
-        Nothing
-          | isGameOver (appMode app) -> []
-          | otherwise -> [Region StartSearch (part "?" "start-search")]
+        Just{} -> button (Just StopSearch) "stop-search"
+        Nothing -> button (StartSearch <$ guard (not (isGameOver (appMode app)))) "start-search"
+
+    confirmButton =
+      case appMode app of
+        Active Just{} Just{} -> button (Just Confirm) "confirm"
+        _                    -> button Nothing "confirm"
+
+    clearButton =
+      case appMode app of
+        Active Just{} _ -> button (Just Clear) "clear"
+        Active _ Just{} -> button (Just Clear) "clear"
+        _               -> button Nothing "clear"
 
     modePart =
       case appMode app of
-        NoInput          -> part "0-f" "position"
-        PosnInput     {} -> part "0-f" "piece"
-        PosnPieceInput{} -> Region Confirm (part "ENTER" "confirm")
-        GameOver      {} -> string defAttr "Game Over"
+        GameOver{}           -> string defAttr "Game Over"
+        Active{}             -> build [confirmButton, clearButton]
 
 
 -- | Render the game board.
-drawQuarto :: Modality -> Quarto -> Drawing UIEvent
-drawQuarto inp q = renderGrid 4 4 2 edge cell
+drawQuarto :: Int -> Modality -> Quarto -> Drawing UIEvent
+drawQuarto counter inp q = renderGrid 4 4 2 edge cell
   where
-    posnAttr =
-      case inp of
-        NoInput -> activeAttr
-        _       -> inactiveAttr
-
     selected
-      = map (\x -> C (x`mod`4) (x`div`4))
-      $ map posnId
+      = fmap (\x -> C (x`mod`4) (x`div`4))
+      $ fmap posnId
       $ case inp of
-          PosnInput      p   -> [p]
-          PosnPieceInput p _ -> [p]
-          GameOver ps        -> ps
-          NoInput            -> []
+          Active p _  -> p
+          GameOver ps -> listToMaybe (drop (counter `mod` 4) ps)
 
     -- boundary of selection
     edge c Horiz = edge1 c up
@@ -359,35 +358,37 @@ drawQuarto inp q = renderGrid 4 4 2 edge cell
     cell (C col row) =
       let posn = Posn (row * 4 + col) in
       case inp of
-        PosnInput p | p == posn ->
+        Active (Just p) Nothing | p == posn ->
           string (defAttr `withForeColor` magenta) "??"
-        PosnPieceInput p piece | p == posn ->
+        Active (Just p) (Just piece) | p == posn ->
           pieceGlyph piece
         _ ->
           case pieceAt q posn of
-            Nothing    -> Region (PickPosn posn)
-                        $ string posnAttr [posnToChar posn,' ']
+            Nothing    -> Region (PickPosn posn) (string defAttr "  ")
             Just piece -> pieceGlyph piece
 
 -- | Draw the available pieces and corresponding piece IDs
 pieceKey :: Modality -> Quarto -> Drawing UIEvent
-pieceKey inp q = renderGrid 4 4 4 (\_ _ -> Nothing) $ \(C col row) ->
+pieceKey inp q = renderGrid 4 4 2 edge  $ \(C col row) ->
   let piece = Piece (row*4+col) in
   if pieceUsed q piece || Just piece == picked
-     then char defAttr '·' :||| string defAttr (replicate 3 ' ')
-     else Region (PickPiece piece)
-        $ char keyAttr (pieceToChar piece) :|||
-          char defAttr ' ' :|||
-          pieceGlyph piece
+     then char defAttr '·' :||| char defAttr ' '
+     else Region (PickPiece piece) (pieceGlyph piece)
   where
-    keyAttr =
+    selected =
       case inp of
-        PosnInput{} -> activeAttr
-        _           -> inactiveAttr
+        Active Nothing (Just (Piece p)) -> Just (C (p`mod`4) (p`div`4))
+        _ -> Nothing
+
+    edge c Horiz = edge1 c up
+    edge c Vert  = edge1 c left
+    edge1 c f
+      | (c `elem` selected) /= (f c `elem` selected) = Just Thin
+      | otherwise                                    = Nothing
 
     picked = case inp of
-                PosnPieceInput _ p -> Just p
-                _                  -> Nothing
+                Active Just{} p -> p
+                _               -> Nothing
 
 -- | Render the hint search results.
 drawHint :: Maybe (Int, Result) -> Maybe (Posn, Piece) -> Drawing UIEvent
